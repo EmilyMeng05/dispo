@@ -15,12 +15,32 @@ from torch.utils.data import DataLoader
 from tqdm.rich import tqdm
 
 from environments import make_env_and_dataset
-from models.nets import ConditionalUnet1D
 from models.sampling import get_pc_sampler
 from models.sde_lib import VPSDE
 from models.utils import TrainState, EMATrainState, get_loss_fn
 from utils import clip_by_global_norm, get_planner
 
+#neural network
+#flax + conditionalunet1d
+class ConditionalUnet1D(nn.Module):
+    output_dim: int
+    global_cond_dim: int
+    embed_dim: int
+    embed_type: str
+
+    def setup(self):
+        self.embed = nn.Dense(self.embed_dim)
+        self.fc1 = nn.Dense(self.embed_dim)
+        self.fc2 = nn.Dense(self.output_dim)
+
+    #forward pass
+    # x: input data
+    # t: time steps
+    # cond: conditional input
+    def __call__(self, x, t, cond):
+        h = self.embed(jnp.concatenate([x, t, cond], axis=-1))
+        h = nn.relu(self.fc1(h))
+        return self.fc2(h)
 
 def build_models(config, env, dataset, rng):
     obs_dim = np.prod(env.observation_space.shape)
@@ -117,10 +137,12 @@ def build_models(config, env, dataset, rng):
         lambda x: x,
         config.model.continuous,
     )
+
     policy_sampler = get_pc_sampler(
         policy_sde,
         policy.model_def,
-        env.action_space.shape,
+        #update the policy sampler to generate multiple actions for given states
+        (config.sampling.num_actions, *env.action_space.shape),  #[action,dimension]
         config.sampling.predictor,
         config.sampling.corrector,
         lambda x: x,
@@ -131,6 +153,8 @@ def build_models(config, env, dataset, rng):
 
     # Infer reward weights
     w_def = nn.Dense(1, use_bias=False)
+    #do we need to validate the reward?
+    # if the reward is in the same dimension
     reward_weights = dataset.infer_reward_weights(config.num_reward_samples)
     w_params = {"kernel": reward_weights}
     w = TrainState.create(
@@ -180,6 +204,7 @@ def update(
     policy,
     policy_loss_fn,
     batch,
+    
 ):
     # Sample target psi
     rng, sample_rng = jax.random.split(rng)
@@ -196,13 +221,17 @@ def update(
         has_aux=True,
     )
 
-    # Update policy
+    # Update policy for multiple actions
     rng, loss_rng = jax.random.split(rng)
     cond = jnp.concatenate([batch["observations"], target_psi], -1)
+    #give us multiple action"
+    actions = batch["actions"][..., : config.sampling.num_actions, :]
+    # check 
+    print("Actions shape:", actions.shape)
     policy, policy_info = policy.apply_loss_fn(
         loss_fn=policy_loss_fn,
         rng=loss_rng,
-        x=batch["actions"],
+        x=actions,
         cond=cond,
         has_aux=True,
     )
@@ -232,6 +261,8 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         rng, action, pinfo = planner(
             rng, psi, psi_sampler, policy, policy_sampler, w, obs
         )
+        #check
+        print("Sampled action shape during evaluation:", action.shape)
 
         # Step environment
         next_obs, _, done, info = env.step(np.array(action[0]))
