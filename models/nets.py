@@ -89,7 +89,7 @@ class ConditionalUnet1D(nn.Module):
     def __call__(self, x, timestep, global_cond):
         assert self.embed_type in ["positional", "fourier"]
 
-        cond_dim = self.embed_dim * 2  # time and conition embeddings
+        cond_dim = self.embed_dim * 2  # time and condition embeddings
         start_dim = self.down_dims[0]
         mid_dim = self.down_dims[-1]
 
@@ -126,5 +126,8 @@ class ConditionalUnet1D(nn.Module):
             x = ConditionalResidualLinearBlock(out_dim, cond_dim)(x, cond)
 
         x = LinearBlock(start_dim)(x)
-        x = nn.Dense(self.output_dim)(x)
+        # output multiple actions
+        x = nn.Dense(self.output_dim)(x)  
+        # reshape to (batch_size, num_actions, action_dim)
+        x = x.reshape(-1, 4, self.output_dim // 4) 
         return x

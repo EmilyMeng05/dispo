@@ -26,6 +26,8 @@ def build_models(config, env, dataset, rng):
     obs_dim = np.prod(env.observation_space.shape)
     act_dim = np.prod(env.action_space.shape)
     feat_dim = env.feat_dim
+    #for now, lets say it's 4 for default
+    num_actions = 4  
 
     # Values for initializing models
     init_obs = jnp.array([env.observation_space.sample()])
@@ -88,7 +90,8 @@ def build_models(config, env, dataset, rng):
 
     # Initialize policy
     policy_def = ConditionalUnet1D(
-        output_dim=act_dim,
+        # output multiple action
+        output_dim=act_dim * num_actions,  
         global_cond_dim=obs_dim + feat_dim,
         embed_dim=config.model.embed_dim,
         embed_type=config.model.embed_type,
@@ -120,7 +123,7 @@ def build_models(config, env, dataset, rng):
     policy_sampler = get_pc_sampler(
         policy_sde,
         policy.model_def,
-        env.action_space.shape,
+        (num_actions, act_dim),  
         config.sampling.predictor,
         config.sampling.corrector,
         lambda x: x,
@@ -199,10 +202,11 @@ def update(
     # Update policy
     rng, loss_rng = jax.random.split(rng)
     cond = jnp.concatenate([batch["observations"], target_psi], -1)
+    actions = batch["actions"].reshape(-1, 4, env.action_space.shape[0]) 
     policy, policy_info = policy.apply_loss_fn(
         loss_fn=policy_loss_fn,
         rng=loss_rng,
-        x=batch["actions"],
+        x=actions,
         cond=cond,
         has_aux=True,
     )
@@ -229,12 +233,13 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         value_bins = np.linspace(value_min, value_max, 100)
 
     while not done:
-        rng, action, pinfo = planner(
+        rng, actions, pinfo = planner(
             rng, psi, psi_sampler, policy, policy_sampler, w, obs
         )
+        actions = actions.reshape(-1, 4, env.action_space.shape[0])  
 
         # Step environment
-        next_obs, _, done, info = env.step(np.array(action[0]))
+        next_obs, _, done, info = env.step(np.array(actions[0]))  
         ep_reward += info["original_reward"]
         ep_success += info.get("success", 0)
         obs = jnp.array(next_obs[None])

@@ -5,6 +5,24 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+# Default action sample is 4
+num_actions = 4
+
+def get_user_input():
+    global num_actions
+    # Prompt user interactions
+    try:
+        user_input = input(f"How many actions do you want to sample? (current: {num_actions}, press Enter to keep): ")
+        if user_input:
+            # Update global num_actions if provided
+            num_actions = int(user_input)  
+            if num_actions <= 0:
+                #invalid cases
+                raise ValueError("Number of actions must be a positive integer.")
+    except ValueError:
+        # press Enter to keep
+        print(f"Using current number of actions: {num_actions}")
+    return num_actions
 
 class OfflineDataset(Dataset):
     def __init__(
@@ -39,10 +57,9 @@ class OfflineDataset(Dataset):
 
 
 class D4RLDataset(OfflineDataset):
-    def __init__(self, env):
-        import d4rl
-
-        dataset = d4rl.qlearning_dataset(env)
+    def __init__(self, env, num_actions=4, sequence_length=3):
+        # Load dataset using env.get_dataset()
+        dataset = env.get_dataset()
 
         observations = dataset["observations"]
         actions = dataset["actions"]
@@ -64,6 +81,38 @@ class D4RLDataset(OfflineDataset):
 
         super().__init__(observations, actions, rewards, next_observations, dones)
 
+        self.num_actions = num_actions
+        self.sequence_length = sequence_length
+        self.full_dataset = {
+            "observations": observations,
+            "actions": actions,
+            "next_observations": next_observations,
+            "rewards": rewards,
+            "dones": dones,
+        }
+
+    def __getitem__(self, idx):
+        # sample a state (state1)
+        state = self.full_dataset["observations"][idx]
+
+        # select a sequence of actions and their corresponding next states
+        # start with an index, and get the following states and actions
+        action_indices = np.arange(idx, idx + self.num_actions) 
+        actions = self.full_dataset["actions"][action_indices]
+        next_states = self.full_dataset["next_observations"][action_indices]
+
+        # ensure that we only have num_actions actions and the corresponding next state
+        action_sequences = actions[:self.num_actions] 
+        next_state = next_states[self.num_actions]  
+
+        # return the state and actions with next_state
+        return dict(
+            state=state,
+            actions=action_sequences,  # action1, action2, ..., actionN
+            next_state=next_state,     # next state after the actions
+            rewards=self.full_dataset["rewards"][idx + self.num_actions], 
+            dones=self.full_dataset["dones"][idx + self.num_actions]     
+        )
 
 class RoboverseDataset(OfflineDataset):
     def __init__(self, env, task, data_dir="data/roboverse"):
@@ -150,11 +199,31 @@ class RaMPDataset(OfflineDataset):
             rewards.append(env_rewards)
             
         
-        return super().__init__(
+        # Initialize parent class
+        super().__init__(
             np.concatenate(observations),
             np.concatenate(actions),
             np.concatenate(rewards),
             np.concatenate(next_observations),
             np.concatenate(dones),
+            )
+    
+    def __getitem__(self, idx):
+        # sample a state
+        state = self.full_dataset["observations"][idx]
+
+        # randomly select multiple actions and their corresponding next states
+        action_indices = np.random.choice(len(self.full_dataset["actions"]), self.num_actions, replace=False)
+        actions = self.full_dataset["actions"][action_indices]
+        next_states = self.full_dataset["next_observations"][action_indices]
+        rewards = self.full_dataset["rewards"][action_indices]
+        dones = self.full_dataset["dones"][action_indices]
+
+        return dict(
+            state=state,
+            actions=actions,
+            next_states=next_states,
+            rewards=rewards,
+            dones=dones,
         )
         
