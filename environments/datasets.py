@@ -4,25 +4,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
-# Default action sample is 4
-num_actions = 4
-
-def get_user_input():
-    global num_actions
-    # Prompt user interactions
-    try:
-        user_input = input(f"How many actions do you want to sample? (current: {num_actions}, press Enter to keep): ")
-        if user_input:
-            # Update global num_actions if provided
-            num_actions = int(user_input)  
-            if num_actions <= 0:
-                #invalid cases
-                raise ValueError("Number of actions must be a positive integer.")
-    except ValueError:
-        # press Enter to keep
-        print(f"Using current number of actions: {num_actions}")
-    return num_actions
+from user_int import get_user_input
 
 class OfflineDataset(Dataset):
     def __init__(
@@ -57,7 +39,11 @@ class OfflineDataset(Dataset):
 
 
 class D4RLDataset(OfflineDataset):
-    def __init__(self, env, num_actions=4, sequence_length=3):
+    def __init__(self, env, num_actions=None, sequence_length=3):
+        # If num_actions is not provided, prompt the user for input
+        if num_actions is None:
+            num_actions = get_user_input()
+
         # Load dataset using env.get_dataset()
         dataset = env.get_dataset()
 
@@ -96,22 +82,21 @@ class D4RLDataset(OfflineDataset):
         state = self.full_dataset["observations"][idx]
 
         # select a sequence of actions and their corresponding next states
-        # start with an index, and get the following states and actions
-        action_indices = np.arange(idx, idx + self.num_actions) 
+        action_indices = np.arange(idx, idx + self.num_actions)
         actions = self.full_dataset["actions"][action_indices]
         next_states = self.full_dataset["next_observations"][action_indices]
 
         # ensure that we only have num_actions actions and the corresponding next state
-        action_sequences = actions[:self.num_actions] 
-        next_state = next_states[self.num_actions]  
+        action_sequences = actions[:self.num_actions]
+        next_state = next_states[self.num_actions]
 
         # return the state and actions with next_state
         return dict(
             state=state,
             actions=action_sequences,  # action1, action2, ..., actionN
             next_state=next_state,     # next state after the actions
-            rewards=self.full_dataset["rewards"][idx + self.num_actions], 
-            dones=self.full_dataset["dones"][idx + self.num_actions]     
+            rewards=self.full_dataset["rewards"][idx + self.num_actions],
+            dones=self.full_dataset["dones"][idx + self.num_actions]
         )
 
 class RoboverseDataset(OfflineDataset):
