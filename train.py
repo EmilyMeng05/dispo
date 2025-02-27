@@ -20,14 +20,15 @@ from models.sampling import get_pc_sampler
 from models.sde_lib import VPSDE
 from models.utils import TrainState, EMATrainState, get_loss_fn
 from utils import clip_by_global_norm, get_planner
+from user_int import get_user_input
 
 
 def build_models(config, env, dataset, rng):
     obs_dim = np.prod(env.observation_space.shape)
     act_dim = np.prod(env.action_space.shape)
     feat_dim = env.feat_dim
-    #for now, lets say it's 4 for default
-    num_actions = 4  
+    #get user input 
+    num_actions = get_user_input()
 
     # Values for initializing models
     init_obs = jnp.array([env.observation_space.sample()])
@@ -183,6 +184,7 @@ def update(
     policy,
     policy_loss_fn,
     batch,
+    num_actions,  
 ):
     # Sample target psi
     rng, sample_rng = jax.random.split(rng)
@@ -202,7 +204,7 @@ def update(
     # Update policy
     rng, loss_rng = jax.random.split(rng)
     cond = jnp.concatenate([batch["observations"], target_psi], -1)
-    actions = batch["actions"].reshape(-1, 4, env.action_space.shape[0]) 
+    actions = batch["actions"].reshape(-1, num_actions, env.action_space.shape[0])  
     policy, policy_info = policy.apply_loss_fn(
         loss_fn=policy_loss_fn,
         rng=loss_rng,
@@ -236,30 +238,36 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         rng, actions, pinfo = planner(
             rng, psi, psi_sampler, policy, policy_sampler, w, obs
         )
-        actions = actions.reshape(-1, 4, env.action_space.shape[0])  
+        # Get user input for num_actions
+        num_actions = get_user_input()
+        actions = actions.reshape(-1, num_actions, env.action_space.shape[0])  
 
-        # Step environment
-        next_obs, _, done, info = env.step(np.array(actions[0]))  
-        ep_reward += info["original_reward"]
-        ep_success += info.get("success", 0)
-        obs = jnp.array(next_obs[None])
+        # Execute all actions in the sequence
+        for action in actions[0]:  
+            next_obs, reward, done, info = env.step(np.array(action))
+            ep_reward += reward  
+            ep_success += info.get("success", 0)
+            obs = jnp.array(next_obs[None])
 
-        # Render frame
-        frame = env.render(mode="rgb_array", width=128, height=128)
-        frames.append(frame)
+            # Render frame
+            frame = env.render(mode="rgb_array", width=128, height=128)
+            frames.append(frame)
 
-        # Visualize values
-        if config.training.log_psi_video:
-            values = w(pinfo["psis"]).sum(-1)
-            fig = plt.figure(figsize=(3, 3))
-            plt.hist(values, bins=value_bins, density=True)
-            plt.ylim([0, 1])
-            plt.title("Value")
-            fig.canvas.draw()
-            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            psi_frames.append(data)
-            plt.close(fig)
+            # Visualize values
+            if config.training.log_psi_video:
+                values = w(pinfo["psis"]).sum(-1)
+                fig = plt.figure(figsize=(3, 3))
+                plt.hist(values, bins=value_bins, density=True)
+                plt.ylim([0, 1])
+                plt.title("Value")
+                fig.canvas.draw()
+                data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                psi_frames.append(data)
+                plt.close(fig)
+
+            if done:
+                break
 
     # Video shape: (T, H, W, C) -> (N, T, C, H, W)
     video = np.stack(frames).transpose(0, 3, 1, 2)[None]
@@ -272,7 +280,6 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         psi_video = np.stack(psi_frames).transpose(0, 3, 1, 2)[None]
         eval_info["test/psi_video"] = wandb.Video(psi_video, fps=30, format="gif")
     return rng, eval_info
-
 
 @hydra.main(version_base=None, config_path="configs/", config_name="dispo.yaml")
 def train(config):
@@ -305,6 +312,9 @@ def train(config):
 
     # Define RNG
     rng = jax.random.PRNGKey(config.seed)
+
+    # get user input
+    num_actions = get_user_input()
 
     # Build models
     (
@@ -341,6 +351,7 @@ def train(config):
                 policy,
                 policy_loss_fn,
                 batch,
+                num_actions=num_actions,  
             )
             wandb.log(train_info)
 
