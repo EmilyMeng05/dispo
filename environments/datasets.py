@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from user_int import get_user_input
+
 
 class OfflineDataset(Dataset):
     def __init__(
@@ -39,20 +39,27 @@ class OfflineDataset(Dataset):
 
 
 class D4RLDataset(OfflineDataset):
-    def __init__(self, env, num_actions=None, sequence_length=3):
-        # If num_actions is not provided, prompt the user for input
-        if num_actions is None:
-            num_actions = get_user_input()
+    def __init__(self, env, num_actions, sequence_length=3):
+        # Set num_actions
+        self.num_actions = num_actions
 
         # Load dataset using env.get_dataset()
         dataset = env.get_dataset()
 
         observations = dataset["observations"]
         actions = dataset["actions"]
-        next_observations = dataset["next_observations"]
         rewards = dataset["rewards"]
         dones = dataset["terminals"]
 
+        # Compute next_observations if not present
+        if "next_observations" not in dataset:
+            next_observations = np.roll(observations, -1, axis=0)
+            # Handle the last observation
+            next_observations[-1] = observations[-1]  
+        else:
+            next_observations = dataset["next_observations"]
+
+        # Handle AntMaze-specific logic
         if "antmaze" in env.spec.id:
             # Compute dense rewards
             goal = np.array(env.target_goal)
@@ -67,7 +74,6 @@ class D4RLDataset(OfflineDataset):
 
         super().__init__(observations, actions, rewards, next_observations, dones)
 
-        self.num_actions = num_actions
         self.sequence_length = sequence_length
         self.full_dataset = {
             "observations": observations,
@@ -78,26 +84,27 @@ class D4RLDataset(OfflineDataset):
         }
 
     def __getitem__(self, idx):
-        # sample a state (state1)
+        # Sample a state (state1)
         state = self.full_dataset["observations"][idx]
 
-        # select a sequence of actions and their corresponding next states
+        # Select a sequence of actions and their corresponding next states
         action_indices = np.arange(idx, idx + self.num_actions)
         actions = self.full_dataset["actions"][action_indices]
         next_states = self.full_dataset["next_observations"][action_indices]
 
-        # ensure that we only have num_actions actions and the corresponding next state
-        action_sequences = actions[:self.num_actions]
+        # Ensure that we only have num_actions actions and the corresponding next state
+        action_sequences = actions[: self.num_actions]
         next_state = next_states[self.num_actions]
 
-        # return the state and actions with next_state
+        # Return the state and actions with next_state
         return dict(
             state=state,
             actions=action_sequences,  # action1, action2, ..., actionN
-            next_state=next_state,     # next state after the actions
+            next_state=next_state,  # next state after the actions
             rewards=self.full_dataset["rewards"][idx + self.num_actions],
-            dones=self.full_dataset["dones"][idx + self.num_actions]
+            dones=self.full_dataset["dones"][idx + self.num_actions],
         )
+
 
 class RoboverseDataset(OfflineDataset):
     def __init__(self, env, task, data_dir="data/roboverse"):
@@ -160,6 +167,7 @@ class AntMazePreferenceDataset(OfflineDataset):
             dataset["terminals"],
         )
 
+
 class RaMPDataset(OfflineDataset):
     def __init__(self, env, dataset_dir="data/ramp"):
         data_dir = os.path.join(dataset_dir, "HopperEnv-v5", "rand_2048")
@@ -182,8 +190,7 @@ class RaMPDataset(OfflineDataset):
             # Relabel rewards by querying the environment
             env_rewards = np.array([env.compute_reward(o) for o in next_observations[-1]])
             rewards.append(env_rewards)
-            
-        
+
         # Initialize parent class
         super().__init__(
             np.concatenate(observations),
@@ -191,8 +198,8 @@ class RaMPDataset(OfflineDataset):
             np.concatenate(rewards),
             np.concatenate(next_observations),
             np.concatenate(dones),
-            )
-    
+        )
+
     def __getitem__(self, idx):
         # sample a state
         state = self.full_dataset["observations"][idx]
@@ -211,4 +218,3 @@ class RaMPDataset(OfflineDataset):
             rewards=rewards,
             dones=dones,
         )
-        

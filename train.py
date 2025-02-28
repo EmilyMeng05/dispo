@@ -22,13 +22,10 @@ from models.utils import TrainState, EMATrainState, get_loss_fn
 from user_int import get_user_input
 
 
-def build_models(config, env, dataset, rng):
+def build_models(config, env, dataset, rng, num_actions):
     obs_dim = np.prod(env.observation_space.shape)
     act_dim = np.prod(env.action_space.shape)
     feat_dim = env.feat_dim
-
-    # Get num_actions from user input
-    num_actions = get_user_input()
 
     # Values for initializing models
     init_obs = jnp.array([env.observation_space.sample()])
@@ -52,6 +49,7 @@ def build_models(config, env, dataset, rng):
     psi_def = ConditionalUnet1D(
         output_dim=feat_dim,
         global_cond_dim=obs_dim,
+        num_actions=num_actions,
         embed_dim=config.model.embed_dim,
         embed_type=config.model.embed_type,
     )
@@ -62,7 +60,7 @@ def build_models(config, env, dataset, rng):
         params=psi_params,
         ema_rate=config.model.ema_rate,
         tx=optax.chain(
-            clip_by_global_norm(1.0),
+            optax.clip_by_global_norm(1.0),
             optax.adamw(learning_rate=lr_fn, weight_decay=config.model.wd),
         ),
     )
@@ -94,6 +92,7 @@ def build_models(config, env, dataset, rng):
         # output multiple action
         output_dim=act_dim * num_actions,  
         global_cond_dim=obs_dim + feat_dim,
+        num_actions=num_actions,
         embed_dim=config.model.embed_dim,
         embed_type=config.model.embed_type,
     )
@@ -106,7 +105,7 @@ def build_models(config, env, dataset, rng):
         params=policy_params,
         ema_rate=config.model.ema_rate,
         tx=optax.chain(
-            clip_by_global_norm(1.0),
+            optax.clip_by_global_norm(1.0),
             optax.adamw(learning_rate=lr_fn, weight_decay=config.model.wd),
         ),
     )
@@ -124,7 +123,7 @@ def build_models(config, env, dataset, rng):
     policy_sampler = get_pc_sampler(
         policy_sde,
         policy.model_def,
-        (num_actions, act_dim),  # Use num_actions here
+        (num_actions, act_dim),
         config.sampling.predictor,
         config.sampling.corrector,
         lambda x: x,
@@ -184,7 +183,7 @@ def update(
     policy,
     policy_loss_fn,
     batch,
-    num_actions,  
+    num_actions,
 ):
     # Sample target psi
     rng, sample_rng = jax.random.split(rng)
@@ -204,7 +203,7 @@ def update(
     # Update policy
     rng, loss_rng = jax.random.split(rng)
     cond = jnp.concatenate([batch["observations"], target_psi], -1)
-    actions = batch["actions"].reshape(-1, num_actions, env.action_space.shape[0])  # Use num_actions here
+    actions = batch["actions"].reshape(-1, num_actions, env.action_space.shape[0])
     policy, policy_info = policy.apply_loss_fn(
         loss_fn=policy_loss_fn,
         rng=loss_rng,
@@ -220,7 +219,7 @@ def update(
     return rng, psi, policy, train_info
 
 
-def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler, w):
+def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler, w, num_actions):
     # Evaluate online
     obs = env.reset()
     obs = jnp.array(obs[None])
@@ -228,25 +227,17 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
     ep_reward, ep_success = 0, 0
     frames = []
     episode_length = 0
-    # For logging histogram of values
-    if config.training.log_psi_video:
-        psi_frames = []
-        value_min = config.reward_min / (1 - config.gamma)
-        value_max = config.reward_max / (1 - config.gamma)
-        value_bins = np.linspace(value_min, value_max, 100)
 
     while not done:
         rng, actions, pinfo = planner(
             rng, psi, psi_sampler, policy, policy_sampler, w, obs
         )
-        # Get user input for num_actions
-        num_actions = get_user_input()
-        actions = actions.reshape(-1, num_actions, env.action_space.shape[0])  
+        actions = actions.reshape(-1, num_actions, env.action_space.shape[0])
 
         # Execute all actions in the sequence
-        for action in actions[0]:  
+        for action in actions[0]:
             next_obs, reward, done, info = env.step(np.array(action))
-            ep_reward += reward  
+            ep_reward += reward
             ep_success += info.get("success", 0)
             obs = jnp.array(next_obs[None])
             episode_length += 1
@@ -273,7 +264,7 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
 
     # Compute distance to goal
     goal = np.array(env.target_goal)
-    final_position = obs[0, :2]  
+    final_position = obs[0, :2]
     distance_to_goal = np.linalg.norm(goal - final_position)
 
     # Video shape: (T, H, W, C) -> (N, T, C, H, W)
@@ -285,10 +276,8 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         "test/distance_to_goal": distance_to_goal,
         "test/video": wandb.Video(video, fps=30, format="gif"),
     }
-    if config.training.log_psi_video:
-        psi_video = np.stack(psi_frames).transpose(0, 3, 1, 2)[None]
-        eval_info["test/psi_video"] = wandb.Video(psi_video, fps=30, format="gif")
     return rng, eval_info
+
 
 @hydra.main(version_base=None, config_path="configs/", config_name="dispo.yaml")
 def train(config):
@@ -304,6 +293,12 @@ def train(config):
     env, dataset = make_env_and_dataset(
         config.env_id, config.seed, config.feat.type, config.feat.dim
     )
+
+    # Get user input for num_actions
+    num_actions = get_user_input()
+
+    # Pass num_actions to the dataset
+    dataset = D4RLDataset(env, num_actions=num_actions)
 
     # Build dataloader
     dataloader = DataLoader(
@@ -322,9 +317,6 @@ def train(config):
     # Define RNG
     rng = jax.random.PRNGKey(config.seed)
 
-    # get user input
-    num_actions = get_user_input()
-
     # Build models
     (
         psi,
@@ -336,7 +328,7 @@ def train(config):
         w,
         planner,
         rng,
-    ) = build_models(config, env, dataset, rng)
+    ) = build_models(config, env, dataset, rng, num_actions)
 
     # Checkpointing utils
     checkpointer = checkpoint.PyTreeCheckpointer()
@@ -360,7 +352,7 @@ def train(config):
                 policy,
                 policy_loss_fn,
                 batch,
-                num_actions=num_actions,  
+                num_actions,
             )
             wandb.log(train_info)
 
@@ -376,6 +368,7 @@ def train(config):
                     policy,
                     policy_sampler,
                     w,
+                    num_actions,
                 )
                 wandb.log(eval_info)
 

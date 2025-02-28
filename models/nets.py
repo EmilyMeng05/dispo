@@ -81,6 +81,7 @@ class ConditionalUnet1D(nn.Module):
 
     output_dim: int
     global_cond_dim: int
+    num_actions: int
     embed_dim: int = 256
     down_dims: tuple = (256, 512, 1024)
     embed_type: str = "positional"
@@ -126,8 +127,6 @@ class ConditionalUnet1D(nn.Module):
             x = ConditionalResidualLinearBlock(out_dim, cond_dim)(x, cond)
 
         x = LinearBlock(start_dim)(x)
-        # output multiple actions
-        x = nn.Dense(self.output_dim)(x)  
-        # reshape to (batch_size, num_actions, action_dim)
-        x = x.reshape(-1, 4, self.output_dim // 4) 
+        x = nn.Dense(self.output_dim)(x)
+        x = x.reshape(-1, self.num_actions, self.output_dim // self.num_actions)
         return x
