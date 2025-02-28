@@ -19,7 +19,6 @@ from models.nets import ConditionalUnet1D
 from models.sampling import get_pc_sampler
 from models.sde_lib import VPSDE
 from models.utils import TrainState, EMATrainState, get_loss_fn
-from utils import clip_by_global_norm, get_planner
 from user_int import get_user_input
 
 
@@ -27,7 +26,8 @@ def build_models(config, env, dataset, rng):
     obs_dim = np.prod(env.observation_space.shape)
     act_dim = np.prod(env.action_space.shape)
     feat_dim = env.feat_dim
-    #get user input 
+
+    # Get num_actions from user input
     num_actions = get_user_input()
 
     # Values for initializing models
@@ -124,7 +124,7 @@ def build_models(config, env, dataset, rng):
     policy_sampler = get_pc_sampler(
         policy_sde,
         policy.model_def,
-        (num_actions, act_dim),  
+        (num_actions, act_dim),  # Use num_actions here
         config.sampling.predictor,
         config.sampling.corrector,
         lambda x: x,
@@ -204,7 +204,7 @@ def update(
     # Update policy
     rng, loss_rng = jax.random.split(rng)
     cond = jnp.concatenate([batch["observations"], target_psi], -1)
-    actions = batch["actions"].reshape(-1, num_actions, env.action_space.shape[0])  
+    actions = batch["actions"].reshape(-1, num_actions, env.action_space.shape[0])  # Use num_actions here
     policy, policy_info = policy.apply_loss_fn(
         loss_fn=policy_loss_fn,
         rng=loss_rng,
@@ -227,6 +227,7 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
     done = False
     ep_reward, ep_success = 0, 0
     frames = []
+    episode_length = 0
     # For logging histogram of values
     if config.training.log_psi_video:
         psi_frames = []
@@ -248,6 +249,7 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
             ep_reward += reward  
             ep_success += info.get("success", 0)
             obs = jnp.array(next_obs[None])
+            episode_length += 1
 
             # Render frame
             frame = env.render(mode="rgb_array", width=128, height=128)
@@ -269,11 +271,18 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
             if done:
                 break
 
+    # Compute distance to goal
+    goal = np.array(env.target_goal)
+    final_position = obs[0, :2]  
+    distance_to_goal = np.linalg.norm(goal - final_position)
+
     # Video shape: (T, H, W, C) -> (N, T, C, H, W)
     video = np.stack(frames).transpose(0, 3, 1, 2)[None]
     eval_info = {
         "test/return": ep_reward,
         "test/success": float(ep_success > 0),
+        "test/episode_length": episode_length,
+        "test/distance_to_goal": distance_to_goal,
         "test/video": wandb.Video(video, fps=30, format="gif"),
     }
     if config.training.log_psi_video:
