@@ -84,23 +84,26 @@ class D4RLDataset(OfflineDataset):
         }
 
     def __getitem__(self, idx):
-        # Sample a state (state1)
+        # Ensure idx is within bounds
+        if idx + self.num_actions >= len(self.full_dataset["observations"]):
+            idx = len(self.full_dataset["observations"]) - self.num_actions - 1
+
+        # Sample the initial state at index idx
         state = self.full_dataset["observations"][idx]
 
-        # Select a sequence of actions and their corresponding next states
+        # Select actions and next states
         action_indices = np.arange(idx, idx + self.num_actions)
         actions = self.full_dataset["actions"][action_indices]
         next_states = self.full_dataset["next_observations"][action_indices]
 
-        # Ensure that we only have num_actions actions and the corresponding next state
-        action_sequences = actions[: self.num_actions]
-        next_state = next_states[self.num_actions]
+        # Pick the last next state
+        next_state = next_states[-1]  # Use -1 to get the last element
 
-        # Return the state and actions with next_state
+        # Return the state, actions, and next state
         return dict(
             state=state,
-            actions=action_sequences,  # action1, action2, ..., actionN
-            next_state=next_state,  # next state after the actions
+            actions=actions,
+            next_state=next_state,
             rewards=self.full_dataset["rewards"][idx + self.num_actions],
             dones=self.full_dataset["dones"][idx + self.num_actions],
         )

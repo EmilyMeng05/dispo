@@ -129,12 +129,12 @@ class DDPMPredictor(Predictor):
         assert not probability_flow, "Probability flow not supported by DDPM sampling"
 
     def update_fn(self, rng, x, t, cond, g=None):
-        # https://github.com/huggingface/diffusers/blob/main/src/diffusers/schedulers/scheduling_ddpm.py
+        # https://github.com/huggingface/diffusers/blob/v0.24.0/src/diffusers/schedulers/scheduling_ddim.py
 
         # Get previous timesteps
         sde = self.sde
         timesteps = (t * sde.N / sde.T).astype(jnp.int32)
-        prev_timesteps = timesteps - jnp.ones_like(timesteps)
+        prev_timesteps = timesteps - jnp.ones_like(timesteps) * self.interval
 
         # Compute alphas, betas
         alpha_prod_t = sde.alphas_cumprod[timesteps, None]
@@ -153,23 +153,61 @@ class DDPMPredictor(Predictor):
         # Add diffusion guidance
         if g is not None:
             score += g
+
+        # Ensure consistent batch sizes
+        min_size = min(score.shape[0], beta_prod_t.shape[0])
+        score = score[:min_size]
+        beta_prod_t = beta_prod_t[:min_size]
+
+        # Reshape beta_prod_t to match the last dimension of x
+        x_dim = x.shape[-1]  # Dynamically get the last dimension of x (129)
+        beta_prod_t = beta_prod_t[:, None, :]  # Shape: (2002, 1, 1)
+        beta_prod_t = jnp.tile(beta_prod_t, (1, score.shape[1], x_dim))  # Shape: (2002, 4, 129)
+        print(f"Shape of beta_prod_t: {beta_prod_t.shape}")
+
+        if score.shape[-1] != x.shape[-1]:
+            score = jnp.tile(score, (1, score.shape[1], x_dim))
+        print(f"Shape of score: {score.shape}")
+        
+        # input of the model 
+        # (2048, 129)
+        # 2048: batch size 
+        # 129 dimension of the output 
+        print(f"Shape of x: {x.shape}")
+        # 2002
+        print(f"Truncated batch size: {min_size}")
+
         # Score is epsilon negated and scaled by 1 / sqrt(beta_prod_t)
+        # should be [min_score, 4, 129]
         eps = -jnp.sqrt(beta_prod_t) * score
+        print(f"Shape of eps: {eps.shape}")
+
+        # Reshape x to match the dimensions of eps
+        # this should be give (min_score, 1, 129)
+        x_reshaped = x[:min_size, None, :]  # Shape: (2002, 1, 129)
+        x_reshaped = jnp.tile(x_reshaped, (1, score.shape[1], 1))  # Shape: (2002, 4, 129)
+        print(f"Shape of x_reshaped_new: {x_reshaped.shape}")
 
         # Predict original x
-        pred_orig_x = (x - jnp.sqrt(beta_prod_t) * eps) / jnp.sqrt(alpha_prod_t)
-        pred_orig_x = pred_orig_x.clip(-1, 1)
+        pred_orig_x = (x_reshaped - jnp.sqrt(beta_prod_t) * eps) / jnp.sqrt(alpha_prod_t[:min_size, None, None])
+        pred_orig_x = pred_orig_x.clip(-1, 1)  
 
         # Predict previous x
-        pred_orig_x_coeff = jnp.sqrt(alpha_prod_t_prev) * current_beta_t / beta_prod_t
-        current_x_coeff = jnp.sqrt(current_alpha_t) * beta_prod_t_prev / beta_prod_t
-        pred_prev_x = pred_orig_x_coeff * pred_orig_x + current_x_coeff * x
+        pred_orig_x_coeff = jnp.sqrt(alpha_prod_t_prev[:min_size, None, None]) * current_beta_t[:min_size, None, None] / beta_prod_t
+        current_x_coeff = jnp.sqrt(current_alpha_t[:min_size, None, None]) * beta_prod_t_prev[:min_size, None, None] / beta_prod_t
+        pred_prev_x = pred_orig_x_coeff * pred_orig_x + current_x_coeff * x_reshaped  
 
         # Add noise
-        noise = random.normal(rng, x.shape)
-        variance = beta_prod_t_prev / beta_prod_t * current_beta_t
-        x = pred_prev_x + jnp.sqrt(variance) * noise
-        return x, pred_prev_x
+        noise = random.normal(rng, x_reshaped.shape)
+        variance = beta_prod_t_prev[:min_size, None, None] / beta_prod_t * current_beta_t[:min_size, None, None]
+        x_new = pred_prev_x + jnp.sqrt(variance) * noise
+
+        # Pad the output to match the original batch size if necessary
+        if min_size < x.shape[0]:
+            padding = jnp.zeros((x.shape[0] - min_size, *x.shape[1:]), dtype=x.dtype)
+            x_new = jnp.concatenate([x_new, padding], axis=0)
+
+        return x_new, pred_prev_x
 
 
 @register_predictor(name="ddim")
@@ -216,42 +254,73 @@ class DDIMPredictor(Predictor):
         # Add diffusion guidance
         if g is not None:
             score += g
+
+        # Ensure consistent batch sizes
+        min_size = min(score.shape[0], beta_prod_t.shape[0])
+        score = score[:min_size]
+        beta_prod_t = beta_prod_t[:min_size]
+
+        # Reshape beta_prod_t to match the last dimension of x
+        x_dim = x.shape[-1]  # Dynamically get the last dimension of x (129)
+        beta_prod_t = beta_prod_t[:, None, :]  # Shape: (2002, 1, 1)
+        beta_prod_t = jnp.tile(beta_prod_t, (1, score.shape[1], x_dim))  # Shape: (2002, 4, 129)
+        print(f"Shape of beta_prod_t: {beta_prod_t.shape}")
+
+        # (2002, 4, 129)
+        # 2002 : batch size
+        # 4 action
+        # 129 dimension of the output, action space or feature space
+        print(f"Shape of score: {score.shape}")
+        # input of the model 
+        # (2048, 129)
+        # 2048: batch size 
+        # 129 dimension of the output 
+        print(f"Shape of x: {x.shape}")
+        # 2002
+        print(f"Truncated batch size: {min_size}")
+
         # Score is epsilon negated and scaled by 1 / sqrt(beta_prod_t)
+        # should be [min_score, 4, 129]
         eps = -jnp.sqrt(beta_prod_t) * score
+        print(f"Shape of eps: {eps.shape}")
+
+        # Reshape x to match the dimensions of eps
+        # this should be give (min_score, 1, 129)
+        x_reshaped = x[:min_size, None, :]  # Shape: (2002, 1, 129)
+        x_reshaped = jnp.tile(x_reshaped, (1, score.shape[1], 1))  # Shape: (2002, 4, 129)
+        print(f"Shape of x_reshaped_new: {x_reshaped.shape}")
 
         # Predict original x
-        pred_orig_x = (x - jnp.sqrt(beta_prod_t) * eps) / jnp.sqrt(alpha_prod_t)
-        pred_orig_x = pred_orig_x.clip(-1, 1)
-
-        # Rederive epsilon from clipped original x
-        if g is not None:
-            eps = (x - jnp.sqrt(alpha_prod_t) * pred_orig_x) / jnp.sqrt(beta_prod_t)
-
-        # Compute variance
-        variance = beta_prod_t_prev / beta_prod_t * current_beta_t
-        std_dev_t = self.eta * jnp.sqrt(variance)
-
-        # Compute direction pointing to x_t
-        pred_x_direction = jnp.sqrt(1 - alpha_prod_t_prev - std_dev_t**2) * eps
+        pred_orig_x = (x_reshaped - jnp.sqrt(beta_prod_t) * eps) / jnp.sqrt(alpha_prod_t[:min_size, None, None])
+        pred_orig_x = pred_orig_x.clip(-1, 1)  
 
         # Predict previous x
-        pred_prev_x = jnp.sqrt(alpha_prod_t_prev) * pred_orig_x + pred_x_direction
+        pred_orig_x_coeff = jnp.sqrt(alpha_prod_t_prev[:min_size, None, None]) * current_beta_t[:min_size, None, None] / beta_prod_t
+        current_x_coeff = jnp.sqrt(current_alpha_t[:min_size, None, None]) * beta_prod_t_prev[:min_size, None, None] / beta_prod_t
+        pred_prev_x = pred_orig_x_coeff * pred_orig_x + current_x_coeff * x_reshaped  
 
         # Add noise
-        noise = random.normal(rng, x.shape)
-        x = pred_prev_x + std_dev_t * noise
-        return x, pred_prev_x
+        noise = random.normal(rng, x_reshaped.shape)
+        variance = beta_prod_t_prev[:min_size, None, None] / beta_prod_t * current_beta_t[:min_size, None, None]
+        x_new = pred_prev_x + jnp.sqrt(variance) * noise
+
+        # Pad the output to match the original batch size if necessary
+        if min_size < x.shape[0]:
+            padding = jnp.zeros((x.shape[0] - min_size, *x.shape[1:]), dtype=x.dtype)
+            x_new = jnp.concatenate([x_new, padding], axis=0)
+
+        return x_new, pred_prev_x
 
 
-@register_predictor(name="none")
-class NonePredictor(Predictor):
-    """An empty predictor that does nothing."""
+    @register_predictor(name="none")
+    class NonePredictor(Predictor):
+        """An empty predictor that does nothing."""
 
-    def __init__(self, sde, score_fn, probability_flow=False):
-        pass
+        def __init__(self, sde, score_fn, probability_flow=False):
+            pass
 
-    def update_fn(self, rng, x, t, cond, g=None):
-        return x, x
+        def update_fn(self, rng, x, t, cond, g=None):
+            return x, x
 
 
 @register_corrector(name="none")
@@ -308,7 +377,7 @@ def shared_corrector_update_fn(
     snr,
     n_steps,
 ):
-    """A wrapper tha configures and returns the update function of correctors."""
+    """A wrapper that configures and returns the update function of correctors."""
     score_fn = mutils.get_score_fn(sde, model_def, params, continuous)
     if corrector is None:
         # Predictor-only sampler
@@ -353,7 +422,7 @@ def get_pc_sampler(
       eta: A `float` number. The variance coefficient of DDIM predictor.
 
     Returns:
-      A sampling function that takes random states, and a replcated training state and returns samples as well as
+      A sampling function that takes random states, and a replicated training state and returns samples as well as
       the number of function evaluations during sampling.
     """
 

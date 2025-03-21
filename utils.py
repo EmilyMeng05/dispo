@@ -1,15 +1,27 @@
 import functools
-
 import jax
 import jax.numpy as jnp
 import optax
 
 
-def batch_add(a, b):
-    return jax.vmap(lambda a, b: a + b)(a, b)
-
-
 def batch_mul(a, b):
+    """
+    Perform element-wise multiplication between two arrays using `jax.vmap`.
+    If the arrays have inconsistent batch sizes, the smaller array is truncated
+    to match the size of the larger array.
+
+    Args:
+        a: First array (e.g., of shape [batch_size, ...]).
+        b: Second array (e.g., of shape [batch_size, ...]).
+
+    Returns:
+        The result of element-wise multiplication between `a` and `b`.
+    """
+    # Ensure consistent batch sizes
+    if a.shape[0] != b.shape[0]:
+        min_size = min(a.shape[0], b.shape[0])  # Find the smaller batch size
+        a = a[:min_size]  # Truncate a
+        b = b[:min_size]  # Truncate b
     return jax.vmap(lambda a, b: a * b)(a, b)
 
 
