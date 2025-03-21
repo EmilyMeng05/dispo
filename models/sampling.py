@@ -160,33 +160,20 @@ class DDPMPredictor(Predictor):
         beta_prod_t = beta_prod_t[:min_size]
 
         # Reshape beta_prod_t to match the last dimension of x
-        x_dim = x.shape[-1]  # Dynamically get the last dimension of x (129)
+        score_dim = score.shape[-1]  # Dynamically get the last dimension of x (129)
         beta_prod_t = beta_prod_t[:, None, :]  # Shape: (2002, 1, 1)
-        beta_prod_t = jnp.tile(beta_prod_t, (1, score.shape[1], x_dim))  # Shape: (2002, 4, 129)
-        print(f"Shape of beta_prod_t: {beta_prod_t.shape}")
-
-        if score.shape[-1] != x.shape[-1]:
-            score = jnp.tile(score, (1, score.shape[1], x_dim))
-        print(f"Shape of score: {score.shape}")
-        
-        # input of the model 
-        # (2048, 129)
-        # 2048: batch size 
-        # 129 dimension of the output 
-        print(f"Shape of x: {x.shape}")
-        # 2002
-        print(f"Truncated batch size: {min_size}")
+        beta_prod_t = jnp.tile(beta_prod_t, (1, score.shape[1], score_dim))  # Shape: (2002, 4, 129)
 
         # Score is epsilon negated and scaled by 1 / sqrt(beta_prod_t)
         # should be [min_score, 4, 129]
         eps = -jnp.sqrt(beta_prod_t) * score
-        print(f"Shape of eps: {eps.shape}")
+
 
         # Reshape x to match the dimensions of eps
         # this should be give (min_score, 1, 129)
         x_reshaped = x[:min_size, None, :]  # Shape: (2002, 1, 129)
         x_reshaped = jnp.tile(x_reshaped, (1, score.shape[1], 1))  # Shape: (2002, 4, 129)
-        print(f"Shape of x_reshaped_new: {x_reshaped.shape}")
+    
 
         # Predict original x
         pred_orig_x = (x_reshaped - jnp.sqrt(beta_prod_t) * eps) / jnp.sqrt(alpha_prod_t[:min_size, None, None])
